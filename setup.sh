@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+#
+# Try-Omarchy app setup — 1Password, Obsidian, Claude Desktop, Espanso
+#
+# Target: Omarchy "try-omarchy" channel, aarch64 Arch Linux ARM,
+#         running as a VM guest on an M4 Max MacBook Pro.
+#
+# Every step is idempotent: re-running skips what is already done.
+#
+# Usage:
+#   ./setup.sh                 # install everything
+#   ./setup.sh 1password       # one app (1password|obsidian|claude|espanso)
+#   ./setup.sh obsidian claude # several
+#   ./setup.sh --check         # report state, change nothing
+#
+set -euo pipefail
+
+# ---------------------------------------------------------------- constants
+
+AUR_CLAUDE="https://aur.archlinux.org/claude-desktop.git"
+ONEPASSWORD_TAR="https://downloads.1password.com/linux/tar/stable/aarch64/1password-latest.tar.gz"
+ARCH_API="https://archlinux.org/packages/search/json/?name=edk2-aarch64&repo=Extra"
+# Arch mirrors file `any`-architecture packages under each real arch directory;
+# there is no extra/os/any/ path (it 404s). x86_64 is the canonical one to pull
+# from, and the package itself is architecture-independent firmware.
+ARCH_MIRROR="https://geo.mirror.pkgbuild.com/extra/os/x86_64"
+
+BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/try-omarchy-setup"
+
+# ------------------------------------------------------------------ output
+
+if [[ -t 1 ]]; then
+  B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; D=$'\e[2m'; N=$'\e[0m'
+else
+  B=""; G=""; Y=""; R=""; D=""; N=""
+fi
+
+step() { printf '\n%s==>%s %s%s%s\n' "$B$G" "$N" "$B" "$*" "$N"; }
+info() { printf '    %s\n' "$*"; }
+skip() { printf '    %s— %s%s\n' "$D" "$*" "$N"; }
+warn() { printf '    %s!  %s%s\n' "$Y" "$*" "$N"; }
+die()  { printf '\n%sERROR:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
+
+have()      { command -v "$1" >/dev/null 2>&1; }
+pkg_local() { pacman -Q "$1" >/dev/null 2>&1; }
+
+# --------------------------------------------------------------- preflight
+
+preflight() {
+  [[ $EUID -ne 0 ]] || die "Run as your normal user, not root. Individual steps call sudo themselves."
+  [[ "$(uname -m)" == "aarch64" ]] || die "This script targets aarch64. Detected: $(uname -m)."
+  have pacman || die "pacman not found — this is not an Arch system."
+
+  # base-devel + git are needed to build anything from the AUR.
+  local need=()
+  pkg_local base-devel >/dev/null 2>&1 || need+=(base-devel)
+  have git || need+=(git)
+  if ((${#need[@]})); then
+    step "Installing build prerequisites: ${need[*]}"
+    sudo pacman -S --needed --noconfirm "${need[@]}"
+  fi
+
+  mkdir -p "$BUILD_DIR"
+}
+
+# ------------------------------------------------------------- 1) 1Password
+#
+# There is no working pacman/AUR route on aarch64: the AUR `1password` package
+# is x86_64-only. 1Password does publish an official aarch64 tarball, which
+# ships its own installer. That installer does all the fiddly work — polkit
+# policy for system unlock, the `onepassword` / `onepassword-mcp` groups, the
+# setuid bit on chrome-sandbox, the .desktop entry, icons, and the /usr/bin
+# symlinks — so we do not reimplement any of it.
+
+install_1password() {
+  step "1Password"
+
+  if [[ -d /opt/1Password ]]; then
+    local v
+    v=$(find /opt/1Password -maxdepth 1 -name '1password-*.arm64' -printf '%f\n' 2>/dev/null | head -1)
+    skip "already installed${v:+ ($v)}"
+    info "To update: sudo /opt/1Password/after-remove.sh && sudo rm -rf /opt/1Password, then re-run."
+    return 0
+  fi
+
+  local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+
+  info "Downloading official aarch64 tarball (~204 MB)..."
+  curl -fL# -o "$tmp/1password.tar.gz" "$ONEPASSWORD_TAR" || die "1Password download failed."
+
+  info "Extracting..."
+  tar -xzf "$tmp/1password.tar.gz" -C "$tmp"
+
+  local src
+  src=$(find "$tmp" -maxdepth 1 -type d -name '1password-*' | head -1)
+  [[ -n "$src" && -x "$src/install.sh" ]] || die "Unexpected tarball layout — no install.sh found."
+
+  info "Running vendor installer (needs root)..."
+  sudo sh "$src/install.sh"
+
+  info "Installed. Launch from the app launcher or run: 1password"
+  warn "Tar installs do NOT auto-update (the vendor's updater is deb/rpm only)."
+  warn "Re-run this script after removing /opt/1Password to upgrade."
+}
+
+# --------------------------------------------------------------- 2) Obsidian
+#
+# Flatpak, not AUR: Flathub publishes an aarch64 build, and the AUR package
+# expects x86_64. The GPU override is the important part — this VM gets no
+# GPU acceleration (no /dev/kvm, no passthrough), and Obsidian's Electron
+# renderer fails to paint without it.
+
+install_obsidian() {
+  step "Obsidian"
+
+  have flatpak || { info "Installing flatpak..."; sudo pacman -S --needed --noconfirm flatpak; }
+
+  if ! flatpak remotes --columns=name | grep -qx flathub; then
+    info "Adding Flathub remote..."
+    flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  fi
+
+  if flatpak info md.obsidian.Obsidian >/dev/null 2>&1; then
+    skip "already installed ($(flatpak info --show-version md.obsidian.Obsidian 2>/dev/null))"
+  else
+    info "Installing from Flathub..."
+    flatpak install -y --noninteractive flathub md.obsidian.Obsidian
+  fi
+
+  # Software rendering. Without this Obsidian opens to a blank/black window.
+  info "Forcing software rendering (OBSIDIAN_DISABLE_GPU=1)..."
+  flatpak override --user --env=OBSIDIAN_DISABLE_GPU=1 md.obsidian.Obsidian
+
+  info "Vault access: the Flatpak holds filesystem=home by default, which covers"
+  info "~/Documents/Hunt-Remote. Point Obsidian at it on first launch."
+}
+
+# --------------------------------------------------- 3) Claude Desktop (AUR)
+#
+# Two aarch64-specific problems, both handled here:
+#
+#   1. yay cannot install this package. The PKGBUILD correctly splits
+#      depends_x86_64 / depends_aarch64, but yay's AUR resolver ignores the
+#      split and tries to satisfy BOTH — so on aarch64 it demands edk2-ovmf
+#      (x86-only) and aborts. makepkg honors $CARCH, so we build directly.
+#
+#   2. Arch Linux ARM ships no edk2-* package at all, so the real aarch64
+#      dependency (edk2-aarch64, UEFI firmware for Cowork's QEMU sandbox) is
+#      missing. It is an `any`-architecture package — firmware blobs, nothing
+#      linked — so the build from Arch's x86_64 mirror installs cleanly here.
+
+ensure_edk2() {
+  if pkg_local edk2-aarch64; then
+    skip "edk2-aarch64 already installed"
+    return 0
+  fi
+
+  info "Resolving current edk2-aarch64 version from the Arch package API..."
+  local fname
+  fname=$(curl -fsSL "$ARCH_API" | python3 -c \
+    'import json,sys; r=json.load(sys.stdin)["results"]; print(r[0]["filename"] if r else "")') \
+    || die "Could not query the Arch package API."
+  [[ -n "$fname" ]] || die "Arch API returned no edk2-aarch64 package."
+
+  local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+  info "Downloading $fname..."
+  curl -fL# -o "$tmp/$fname" "$ARCH_MIRROR/$fname" || die "edk2-aarch64 download failed."
+
+  # Signed by an Arch developer whose key is already in the ALARM keyring, so
+  # this verifies even though the package comes from a different distro's mirror.
+  if curl -fsSL -o "$tmp/$fname.sig" "$ARCH_MIRROR/$fname.sig"; then
+    if gpg --homedir /etc/pacman.d/gnupg --verify "$tmp/$fname.sig" "$tmp/$fname" >/dev/null 2>&1; then
+      info "Signature verified against the pacman keyring."
+    else
+      warn "Signature did NOT verify. Inspect $tmp/$fname before trusting it."
+      die "Refusing to install an unverified firmware package."
+    fi
+  else
+    warn "No .sig available; continuing (LocalFileSigLevel is Optional)."
+  fi
+
+  info "Installing edk2-aarch64..."
+  sudo pacman -U --noconfirm "$tmp/$fname"
+  warn "edk2-aarch64 comes from Arch, not ALARM — 'pacman -Syu' will not update it."
+}
+
+install_claude() {
+  step "Claude Desktop"
+
+  if pkg_local claude-desktop; then
+    skip "already installed ($(pacman -Q claude-desktop | awk '{print $2}'))"
+  else
+    ensure_edk2
+
+    info "Installing runtime dependencies..."
+    sudo pacman -S --needed --noconfirm virtiofsd qemu-system-aarch64
+
+    local repo="$BUILD_DIR/claude-desktop"
+    if [[ -d "$repo/.git" ]]; then
+      info "Updating existing AUR checkout..."
+      git -C "$repo" pull --ff-only
+    else
+      info "Cloning AUR package..."
+      rm -rf "$repo"
+      git clone --quiet "$AUR_CLAUDE" "$repo"
+    fi
+
+    echo
+    warn "Review the PKGBUILD before building (this is AUR, i.e. untrusted):"
+    warn "  less $repo/PKGBUILD"
+    echo
+
+    # -d skips makepkg's dep check: we installed the aarch64 deps above, and
+    # makepkg would otherwise re-resolve them. -f overwrites a stale build.
+    info "Building (downloads a ~158 MB .deb, takes a few minutes)..."
+    ( cd "$repo" && makepkg -f -d )
+
+    local built
+    built=$(find "$repo" -maxdepth 1 -name 'claude-desktop-*.pkg.tar.*' | head -1)
+    [[ -n "$built" ]] || die "Build produced no package."
+
+    info "Installing $(basename "$built")..."
+    sudo pacman -U --noconfirm "$built"
+  fi
+
+  # Cowork runs its sandbox in QEMU. That is nested virtualisation here.
+  if [[ -e /dev/kvm ]]; then
+    info "/dev/kvm present — Cowork's VM sandbox should be hardware-accelerated."
+  else
+    warn "/dev/kvm is absent: nested virtualisation is not exposed to this guest."
+    warn "Cowork's sandbox will fall back to slow software emulation, or fail."
+    warn "Fix on the macOS side: enable nested virtualisation for this VM in your"
+    warn "hypervisor. The M4 Max supports it (Apple Silicon added it with M3)."
+    warn "Chat and Claude Code are unaffected."
+  fi
+}
+
+# ---------------------------------------------------------------- 4) Espanso
+#
+# Wayland needs the separate `espanso-wayland` AUR build (the plain `espanso`
+# package is X11). It reads the keyboard through evdev, so the user must be in
+# the `input` group — without it espanso starts but silently expands nothing.
+
+install_espanso() {
+  step "Espanso"
+
+  if pkg_local espanso-wayland; then
+    skip "espanso-wayland already installed ($(pacman -Q espanso-wayland | awk '{print $2}'))"
+  else
+    have yay || die "yay not found. Install an AUR helper, or build espanso-wayland with makepkg."
+    info "Installing espanso-wayland from the AUR (Rust build — this is slow)..."
+    yay -S --needed espanso-wayland
+  fi
+
+  if id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
+    skip "$USER is already in the 'input' group"
+  else
+    info "Adding $USER to the 'input' group (required for key capture on Wayland)..."
+    sudo gpasswd -a "$USER" input
+    warn "Log out and back in for the new group to take effect."
+  fi
+
+  if [[ -f "$HOME/.config/systemd/user/espanso.service" ]]; then
+    skip "service already registered"
+  else
+    info "Registering the espanso user service..."
+    espanso service register
+  fi
+
+  systemctl --user enable --now espanso >/dev/null 2>&1 || \
+    warn "Could not start the service — try 'systemctl --user status espanso' after relogin."
+
+  info "Config lives in ~/.config/espanso (config/default.yml, match/base.yml)."
+  info "Test with ':espanso' — it should expand to 'Hi there!'."
+}
+
+# ------------------------------------------------------------------- report
+
+report() {
+  step "Current state"
+  printf '    %-16s %s\n' "1Password" \
+    "$([[ -d /opt/1Password ]] && echo "installed" || echo "MISSING")"
+  printf '    %-16s %s\n' "Obsidian" \
+    "$(flatpak info md.obsidian.Obsidian >/dev/null 2>&1 && echo "installed (flatpak)" || echo "MISSING")"
+  printf '    %-16s %s\n' "Claude Desktop" \
+    "$(pkg_local claude-desktop && pacman -Q claude-desktop | awk '{print $2}' || echo "MISSING")"
+  printf '    %-16s %s\n' "Espanso" \
+    "$(pkg_local espanso-wayland && pacman -Q espanso-wayland | awk '{print $2}' || echo "MISSING")"
+  printf '    %-16s %s\n' "edk2-aarch64" \
+    "$(pkg_local edk2-aarch64 && pacman -Q edk2-aarch64 | awk '{print $2}' || echo "MISSING")"
+  printf '    %-16s %s\n' "input group" \
+    "$(id -nG "$USER" | tr ' ' '\n' | grep -qx input && echo "yes" || echo "NO — espanso will not capture keys")"
+  printf '    %-16s %s\n' "/dev/kvm" \
+    "$([[ -e /dev/kvm ]] && echo "present" || echo "absent — Cowork sandbox degraded")"
+  echo
+}
+
+# --------------------------------------------------------------------- main
+
+main() {
+  if [[ "${1:-}" == "--check" ]]; then report; exit 0; fi
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+  fi
+
+  preflight
+
+  local targets=("$@")
+  ((${#targets[@]})) || targets=(1password obsidian claude espanso)
+
+  for t in "${targets[@]}"; do
+    case "$t" in
+      1password|1p)            install_1password ;;
+      obsidian)                install_obsidian ;;
+      claude|claude-desktop)   install_claude ;;
+      espanso)                 install_espanso ;;
+      *) die "Unknown target: $t (valid: 1password obsidian claude espanso)" ;;
+    esac
+  done
+
+  report
+  step "Done."
+  info "If you were added to the 'input' group, log out and back in."
+}
+
+main "$@"
