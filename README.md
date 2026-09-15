@@ -18,9 +18,12 @@ precaution.
 git clone https://github.com/jhunt299/try-omarchy-setup
 cd try-omarchy-setup
 ./setup.sh --check     # report what's installed, change nothing
-./setup.sh             # install all four
-./setup.sh obsidian    # just one (1password | obsidian | claude | espanso)
+./setup.sh             # install and configure everything
+./setup.sh obsidian    # just one target
 ```
+
+Targets: `1password` `obsidian` `claude` `espanso` `voxtype` `hyprland`
+`claude-code`. The last two only write config and need no `sudo`.
 
 The script is idempotent — re-running skips anything already done, so it is safe
 to run repeatedly or to resume after a failure.
@@ -31,8 +34,8 @@ compiles from Rust source.
 
 ### Afterwards
 
-1. **Log out and back in** if the script added you to the `input` group. Espanso
-   will not expand anything until you do.
+1. **Log out and back in** if the script added you to the `input` group. Neither
+   Espanso nor Voxtype will capture keys until you do.
 2. Open Obsidian and point it at `~/Documents/Hunt-Remote`.
 3. Sign in to 1Password and Claude Desktop.
 
@@ -150,6 +153,146 @@ Config lives in `~/.config/espanso/` — `config/default.yml` and
 
 ---
 
+### Voxtype — slow build, and the models are a separate download
+
+Unlike the other four, `voxtype` builds cleanly on aarch64 — its PKGBUILD
+declares the architecture. The problems are elsewhere:
+
+The build is **three sequential Rust release builds** (native CPU, Vulkan, then
+the OSD frontends) with a `cargo clean` between each, so it takes roughly five
+minutes on eight cores. The `check()` phase would add a fourth in debug mode,
+so the script passes `--nocheck`.
+
+The source tarball is **signed**, and `makepkg` stops dead if the two signing
+keys are not already in your keyring. The script imports them up front rather
+than letting an interactive prompt block an unattended run.
+
+**Models are not bundled.** Install voxtype alone and the daemon starts, loads
+nothing, and transcribes silence — which reads as a broken install rather than
+a missing download. The script pulls `base.en` (~142 MB) and the Silero VAD
+model. VAD stays disabled; voxtype ships it opt-in, and turning it on means
+editing `~/.config/voxtype/config.toml`.
+
+Hold **Scroll Lock** to dictate. Text is typed at the cursor via `wtype`.
+
+Do not raise the PKGBUILD's `-j4` limit — it is there to avoid a cmake deadlock
+in the whisper-rs build.
+
+---
+
+## Desktop configuration
+
+Two targets write config rather than installing anything, and neither needs
+`sudo`.
+
+### `hyprland` — pin apps to fixed workspaces
+
+Appends window rules to `~/.config/hypr/hyprland.lua`, between markers, after
+backing the file up. Re-running is a no-op, and if equivalent rules were added
+by hand the script leaves them alone rather than stacking duplicates.
+
+| Workspace | Apps |
+|-----------|------|
+| 1 | Obsidian |
+| 2 | Gmail web apps |
+| 3 | Claude Desktop, Claude Code |
+| 5 | Files (Nautilus) |
+| 6 | 1Password, Voxtype settings |
+
+Two things that are not obvious:
+
+**Chromium derives a window class from the URL's host and path only** — the
+query string is dropped. Per-account Gmail web apps differing only in
+`?authuser=` therefore all share one class, so a single rule catches every one
+of them. The flip side is that they cannot be told apart by class.
+
+**Claude Code has its own class.** Omarchy launches it as
+`foot --app-id org.omarchy.agent claude`, so pinning it does not drag ordinary
+`foot` terminals along.
+
+Rules apply to **newly opened windows only**. Anything already running stays
+where it is until you close and reopen it.
+
+### `claude-code` — stop the trust prompt on every launch
+
+Claude Code asks whether you trust the working directory on each start unless
+that directory is marked trusted in `~/.claude.json`. `$HOME` in particular
+never persists on its own here, so the prompt returns every session. The script
+sets `hasTrustDialogAccepted` for your home directory, backing the file up
+first.
+
+---
+
+## Known issues on this platform
+
+These are environmental, not caused by anything above. Each one cost real time.
+
+### `omarchy update` is currently broken
+
+`aquamarine` 0.15.0 bumped its library version to `libaquamarine.so=14`.
+`hyprtoolkit` has been rebuilt against it; **`hyprland` has not**, in any
+configured repo — both `extra` and `try-omarchy` still require
+`libaquamarine.so=13`. The dependency is unsatisfiable in either direction, so
+`pacman -Syu` aborts during resolution and the whole update does nothing:
+
+```
+:: installing aquamarine (0.15.0-2) breaks dependency 'libaquamarine.so=13-64' required by hyprland
+error: failed to prepare transaction (could not satisfy dependencies)
+```
+
+Nothing is half-installed — it fails before the transaction starts. This is
+Arch Linux ARM lag waiting on a `hyprland` rebuild. To unblock the rest:
+
+```bash
+sudo pacman -Syu --ignore aquamarine --ignore hyprtoolkit
+```
+
+`omarchy-update` runs under `set -e` with the package step ahead of migrations,
+hooks, AUR updates and orphan cleanup, so a failure here silently skips all of
+them.
+
+### `fcitx5` is missing from a base install
+
+`fcitx5` is listed in `/usr/share/omarchy/install/omarchy-base.packages` and is
+available in `extra`, but it was never installed here — it appears nowhere in
+`pacman.log`. Migration `1785167800.sh` then enabled `omarchy-fcitx5.service`,
+which has been restarting every two seconds ever since:
+
+```
+Unable to locate executable '/usr/bin/fcitx5': No such file or directory
+```
+
+Fix with `sudo pacman -S fcitx5 fcitx5-gtk fcitx5-qt`, or disable the service
+with `systemctl --user disable --now omarchy-fcitx5.service` if you do not need
+`~/.XCompose` CapsLock compose sequences.
+
+### The GTK icon cache never rebuilds
+
+Every package install ends with `gtk-update-icon-cache: The generated cache was
+invalid.` `/usr/share/icons/hicolor/icon-theme.cache` is stale, so newly
+installed apps can show a generic launcher icon. Harmless, but it affects every
+app, not just the one being installed:
+
+```bash
+sudo gtk-update-icon-cache -f /usr/share/icons/hicolor
+```
+
+### The CPU has neither SVE nor SME
+
+`/proc/cpuinfo` on this guest lists `asimd`, `asimddp`, `i8mm`, `bf16` — and
+**no `sve`, no `sme`**. `gcc -mcpu=native` resolves to `generic`.
+
+Any aarch64 binary compiled against those extensions dies with `SIGILL` /
+`ILL_ILLOPC` here. Brave does exactly this and crash-loops, which once filled
+the disk with coredumps. Expect it from any Chromium or Electron app.
+
+The advertised feature set has appeared to differ between boots, so read
+`/proc/cpuinfo` rather than trusting a cached list — and when an ARM binary
+dies with SIGILL, disassemble the faulting instruction before assuming memory
+corruption.
+
+---
+
 ## Cowork and nested virtualisation
 
 Claude Desktop's **Cowork** feature runs its sandbox inside a QEMU VM. On this
@@ -180,27 +323,34 @@ A healthy instance reports:
 Obsidian         installed (flatpak)
 Claude Desktop   1.52386.6-1
 Espanso          2.4.1-1
+Voxtype          1.0.1-1
+  model          present
+workspace rules  applied
+fcitx5           MISSING — omarchy-fcitx5.service will crash-loop
 edk2-aarch64     202608-1
 input group      yes
 /dev/kvm         absent — Cowork sandbox degraded
 ```
 
 `/dev/kvm absent` is expected until nested virt is enabled on the macOS side.
-Everything else should say installed.
+`fcitx5 MISSING` is the upstream gap described above, not something this script
+causes. Everything else should say installed or applied.
 
 ---
 
 ## Bootstrapping a fresh instance
 
 On a brand-new Try-Omarchy VM, git is already present. One line gets you from
-nothing to all four apps:
+nothing to a configured instance:
 
 ```bash
 git clone https://github.com/jhunt299/try-omarchy-setup && ./try-omarchy-setup/setup.sh
 ```
 
 Nothing in this repo is private: no credentials, no vault content, no personal
-paths beyond `~/Documents/Hunt-Remote` as the Obsidian vault location.
+paths beyond `~/Documents/Hunt-Remote` as the Obsidian vault location, and no
+email addresses. Per-account web-app setup is deliberately left out for that
+reason — it would hardcode addresses into a public repo.
 
 ---
 
@@ -214,6 +364,9 @@ Captured 2026-09-14 from the working instance:
 | Obsidian | 1.13.7 (flatpak, flathub) |
 | Claude Desktop | 1.52386.6-1 (AUR) |
 | Espanso | 2.4.1-1 (`espanso-wayland`, AUR) |
+| Voxtype | 1.0.1-1 (AUR, built from source) |
+| Whisper model | `ggml-base.en.bin` (~142 MB) |
+| Hyprland | 0.56.1 |
 | edk2-aarch64 | 202608-1 (Arch `extra`) |
 | Kernel | 7.2.2-2-aarch64-ARCH |
 

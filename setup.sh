@@ -8,10 +8,12 @@
 # Every step is idempotent: re-running skips what is already done.
 #
 # Usage:
-#   ./setup.sh                 # install everything
-#   ./setup.sh 1password       # one app (1password|obsidian|claude|espanso)
+#   ./setup.sh                 # install and configure everything
+#   ./setup.sh 1password       # one target
 #   ./setup.sh obsidian claude # several
 #   ./setup.sh --check         # report state, change nothing
+#
+#   Targets: 1password obsidian claude espanso voxtype hyprland claude-code
 #
 set -euo pipefail
 
@@ -51,9 +53,11 @@ preflight() {
   [[ "$(uname -m)" == "aarch64" ]] || die "This script targets aarch64. Detected: $(uname -m)."
   have pacman || die "pacman not found — this is not an Arch system."
 
-  # base-devel + git are needed to build anything from the AUR.
+  # base-devel + git are needed to build anything from the AUR. base-devel is a
+  # package *group*, so `pacman -Q base-devel` always fails and must not be used
+  # as the test — checking for the tools themselves is what actually works.
   local need=()
-  pkg_local base-devel >/dev/null 2>&1 || need+=(base-devel)
+  if ! { have gcc && have make && have fakeroot; }; then need+=(base-devel); fi
   have git || need+=(git)
   if ((${#need[@]})); then
     step "Installing build prerequisites: ${need[*]}"
@@ -274,6 +278,171 @@ install_espanso() {
   info "Test with ':espanso' — it should expand to 'Hi there!'."
 }
 
+# --------------------------------------------------------------- 5) voxtype
+#
+# Push-to-talk voice-to-text. The AUR package builds from Rust source and does
+# declare aarch64, so it works here — but three things make it slow or fragile:
+#
+#   * The PKGBUILD runs three sequential release builds (native CPU, Vulkan,
+#     then the OSD frontends) with a `cargo clean` between each. Its check()
+#     phase would add a fourth in debug mode, so we skip it.
+#   * The source tarball is signed, and makepkg aborts if the two signing keys
+#     are not already in the user keyring. We import them first rather than
+#     letting the build stop on an interactive prompt.
+#   * Models are not bundled. Without them the daemon starts and transcribes
+#     nothing, which looks like a broken install rather than a missing download.
+
+VOXTYPE_KEYS=(
+  E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6  # maintainer (legacy assets)
+  9CCF7915B750CAE8B095ED1AA3FC9F33FD209279  # CI release signing
+)
+VOXTYPE_MODEL="base.en"
+
+ensure_input_group() {
+  if id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
+    skip "$USER is already in the 'input' group"
+  else
+    info "Adding $USER to the 'input' group (required for key capture on Wayland)..."
+    sudo gpasswd -a "$USER" input
+    warn "Log out and back in for the new group to take effect."
+  fi
+}
+
+install_voxtype() {
+  step "Voxtype"
+
+  if pkg_local voxtype; then
+    skip "voxtype already installed ($(pacman -Q voxtype | awk '{print $2}'))"
+  else
+    have yay || die "yay not found. Install an AUR helper, or build voxtype with makepkg."
+
+    info "Importing the voxtype signing keys..."
+    for k in "${VOXTYPE_KEYS[@]}"; do
+      gpg --list-keys "$k" >/dev/null 2>&1 && continue
+      gpg --keyserver keyserver.ubuntu.com --recv-keys "$k" >/dev/null 2>&1 || \
+        warn "Could not fetch key $k — the build may stop to ask about it."
+    done
+
+    info "Building voxtype from the AUR (three Rust release builds — ~5 min on 8 cores)..."
+    yay -S --needed --mflags --nocheck voxtype
+  fi
+
+  ensure_input_group
+
+  # Whisper model. Without --no-post-install this prints a second copy of the
+  # package's own next-steps banner.
+  if compgen -G "$HOME/.local/share/voxtype/models/*.bin" >/dev/null; then
+    skip "a model is already present ($(basename "$(ls "$HOME"/.local/share/voxtype/models/*.bin | head -1)"))"
+  else
+    info "Downloading the $VOXTYPE_MODEL Whisper model (~142 MB)..."
+    voxtype setup --download --model "$VOXTYPE_MODEL" --no-post-install
+  fi
+
+  # Silero VAD — downloaded here, but left disabled: voxtype ships it opt-in.
+  if [[ -f "$HOME/.local/share/voxtype/models/ggml-silero-vad.bin" ]]; then
+    skip "VAD model already present"
+  else
+    info "Downloading the Silero VAD model..."
+    voxtype setup vad >/dev/null 2>&1 || warn "VAD download failed — not fatal."
+  fi
+
+  systemctl --user enable --now voxtype >/dev/null 2>&1 || \
+    warn "Could not start the service — try 'systemctl --user status voxtype'."
+
+  info "Hold Scroll Lock to dictate; text is typed at the cursor via wtype."
+  info "To enable VAD, set [vad] enabled = true in ~/.config/voxtype/config.toml."
+}
+
+# ------------------------------------------------- 6) desktop configuration
+
+# Hyprland window rules pinning apps to fixed workspaces. Appended to the user
+# config rather than written over it, and guarded by a marker so re-running
+# does not stack duplicates.
+HYPR_MARKER="-- >>> try-omarchy-setup: workspace rules >>>"
+
+configure_hyprland() {
+  step "Hyprland workspace rules"
+
+  local conf="$HOME/.config/hypr/hyprland.lua"
+  [[ -f $conf ]] || { warn "$conf not found — skipping."; return 0; }
+
+  if grep -qF -- "$HYPR_MARKER" "$conf"; then
+    skip "workspace rules already present"
+  elif grep -qF 'md\\.obsidian' "$conf"; then
+    skip "equivalent rules already added by hand — leaving them alone"
+  else
+    info "Appending workspace rules to hyprland.lua..."
+    cp "$conf" "$conf.bak.$(date +%s)"
+    cat >>"$conf" <<'RULES'
+
+-- >>> try-omarchy-setup: workspace rules >>>
+-- Obsidian (all vaults share one class) on workspace 1.
+o.window("^md\\.obsidian\\.Obsidian$", { workspace = "1" })
+
+-- Gmail web apps on workspace 2. Chromium derives the window class from the
+-- URL's host and path only — the ?authuser= query is dropped — so every
+-- per-account Gmail web app shares this one class. Harmless if none exist.
+o.window("^brave-mail\\.google\\.com__mail.*-Default$", { workspace = "2" })
+
+-- Claude Desktop and Claude Code on workspace 3. Claude Code runs as
+-- `foot --app-id org.omarchy.agent claude`, so it has its own class and this
+-- does not affect ordinary foot terminals.
+o.window("^com\\.anthropic\\.Claude$", { workspace = "3" })
+o.window("^org\\.omarchy\\.agent$", { workspace = "3" })
+
+-- Files on workspace 5.
+o.window("^org\\.gnome\\.Nautilus$", { workspace = "5" })
+
+-- 1Password and the voxtype settings TUI on workspace 6.
+o.window("^com\\.onepassword\\.OnePassword$", { workspace = "6" })
+o.window("^voxtype$", { workspace = "6" })
+-- <<< try-omarchy-setup: workspace rules <<<
+RULES
+  fi
+
+  if have hyprctl && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    hyprctl reload >/dev/null 2>&1 || true
+    local errs
+    errs=$(hyprctl configerrors 2>/dev/null | tr -d '[:space:]')
+    [[ -z $errs ]] || warn "hyprctl reported config errors — run 'hyprctl configerrors'."
+  else
+    info "Hyprland is not running; rules apply at next login."
+  fi
+
+  info "Rules apply to newly opened windows only — existing ones stay put."
+}
+
+# Claude Code prompts to trust the working directory on every launch unless the
+# directory is marked trusted in ~/.claude.json. $HOME in particular never
+# persists on its own here.
+configure_claude_code() {
+  step "Claude Code trust prompt"
+
+  local cfg="$HOME/.claude.json"
+  if [[ ! -f $cfg ]]; then
+    skip "no ~/.claude.json yet — run Claude Code once, then re-run this step"
+    return 0
+  fi
+
+  have python3 || { warn "python3 not found — skipping."; return 0; }
+
+  python3 - "$cfg" "$HOME" <<'PY'
+import json, shutil, sys, time
+cfg, home = sys.argv[1], sys.argv[2]
+with open(cfg) as f:
+    data = json.load(f)
+proj = data.setdefault("projects", {}).setdefault(home, {})
+if proj.get("hasTrustDialogAccepted") is True:
+    print("    \033[2m— already trusted\033[0m")
+else:
+    shutil.copy2(cfg, f"{cfg}.bak.{int(time.time())}")
+    proj["hasTrustDialogAccepted"] = True
+    with open(cfg, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"    marked {home} as trusted (backup written)")
+PY
+}
+
 # ------------------------------------------------------------------- report
 
 report() {
@@ -286,6 +455,14 @@ report() {
     "$(pkg_local claude-desktop && pacman -Q claude-desktop | awk '{print $2}' || echo "MISSING")"
   printf '    %-16s %s\n' "Espanso" \
     "$(pkg_local espanso-wayland && pacman -Q espanso-wayland | awk '{print $2}' || echo "MISSING")"
+  printf '    %-16s %s\n' "Voxtype" \
+    "$(pkg_local voxtype && pacman -Q voxtype | awk '{print $2}' || echo "MISSING")"
+  printf '    %-16s %s\n' "  model" \
+    "$(compgen -G "$HOME/.local/share/voxtype/models/*.bin" >/dev/null && echo "present" || echo "MISSING — daemon transcribes nothing")"
+  printf '    %-16s %s\n' "workspace rules" \
+    "$(grep -qF 'md\\.obsidian' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null && echo "applied" || echo "not applied")"
+  printf '    %-16s %s\n' "fcitx5" \
+    "$(pkg_local fcitx5 && echo "installed" || echo "MISSING — omarchy-fcitx5.service will crash-loop")"
   printf '    %-16s %s\n' "edk2-aarch64" \
     "$(pkg_local edk2-aarch64 && pacman -Q edk2-aarch64 | awk '{print $2}' || echo "MISSING")"
   printf '    %-16s %s\n' "input group" \
@@ -307,7 +484,7 @@ main() {
   preflight
 
   local targets=("$@")
-  ((${#targets[@]})) || targets=(1password obsidian claude espanso)
+  ((${#targets[@]})) || targets=(1password obsidian claude espanso voxtype hyprland claude-code)
 
   for t in "${targets[@]}"; do
     case "$t" in
@@ -315,7 +492,10 @@ main() {
       obsidian)                install_obsidian ;;
       claude|claude-desktop)   install_claude ;;
       espanso)                 install_espanso ;;
-      *) die "Unknown target: $t (valid: 1password obsidian claude espanso)" ;;
+      voxtype)                 install_voxtype ;;
+      hyprland|workspaces)     configure_hyprland ;;
+      claude-code|cc)          configure_claude_code ;;
+      *) die "Unknown target: $t (valid: 1password obsidian claude espanso voxtype hyprland claude-code)" ;;
     esac
   done
 
