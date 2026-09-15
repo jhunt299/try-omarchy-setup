@@ -24,8 +24,9 @@ different reason — and its "Known issues on this platform" section documents
 four environmental problems that will otherwise waste your time.
 
 That installs 1Password, Obsidian, Claude Desktop, Espanso and Voxtype, then
-applies my Hyprland workspace rules, the Claude Code trust flag, and the
-`SUPER + N` Obsidian note jumper. Individual targets work too, e.g.
+applies my Hyprland workspace rules, the Claude Code trust flag, the
+`SUPER + N` Obsidian note jumper, and a Japanese font without which the matrix
+screensaver renders as a screen of boxes. Individual targets work too, e.g.
 `./setup.sh voxtype hyprland`.
 
 ### How to work on this machine

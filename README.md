@@ -23,8 +23,8 @@ cd try-omarchy-setup
 ```
 
 Targets: `1password` `obsidian` `claude` `espanso` `voxtype` `hyprland`
-`claude-code` `obsidian-jump`. The last three only write config and need no
-`sudo`.
+`claude-code` `obsidian-jump` `fonts`. `hyprland`, `claude-code` and
+`obsidian-jump` only write config and need no `sudo`.
 
 The script is idempotent — re-running skips anything already done, so it is safe
 to run repeatedly or to resume after a failure.
@@ -262,6 +262,38 @@ first.
 
 ---
 
+### `fonts` — the screensaver cannot draw its own glyphs
+
+Omarchy's screensaver is `ttfx --random-effect`, and one of those effects is
+matrix rain in Japanese katakana. **A stock instance has no font covering
+U+30A2 / U+FF71**, so that effect renders as a full screen of tofu boxes.
+
+This is not a local misconfiguration — it is true of any fresh install. Checked
+on this machine before fixing:
+
+```
+U+30A2 (ア)  *** NO FONT ***
+U+FF71 (ｱ)  *** NO FONT ***
+U+2588 (█)  JetBrainsMono Nerd Font
+U+2591 (░)  JetBrainsMono Nerd Font
+```
+
+Only katakana is missing. The Omarchy logo in `screensaver.txt` is block
+characters, which JetBrainsMono already covers, so nothing else is affected.
+
+The target installs `adobe-source-han-sans-jp-fonts` (~30 MB). `noto-fonts-cjk`
+would also work and adds Chinese and Korean, but costs ~300 MB. Fontconfig
+falls back per glyph, so the terminal font is unchanged and only the katakana
+come from the new font — no terminal config to edit.
+
+Verify with:
+
+```bash
+fc-list ':charset=30a2' family | head -1
+```
+
+---
+
 ## Known issues on this platform
 
 These are environmental, not caused by anything above. Each one cost real time.
@@ -366,6 +398,7 @@ Voxtype          1.0.1-1
   model          present
 workspace rules  applied
 obsidian-jump    installed (SUPER + N)
+katakana font    Source Han Sans JP
 fcitx5           MISSING — omarchy-fcitx5.service will crash-loop
 edk2-aarch64     202608-1
 input group      yes
@@ -408,6 +441,7 @@ Captured 2026-09-14 from the working instance:
 | Whisper model | `ggml-base.en.bin` (~142 MB) |
 | Hyprland | 0.56.1 |
 | fzf | 0.74.3 (Omarchy base package) |
+| Japanese font | adobe-source-han-sans-jp-fonts 2.005-2 |
 | edk2-aarch64 | 202608-1 (Arch `extra`) |
 | Kernel | 7.2.2-2-aarch64-ARCH |
 

@@ -14,7 +14,7 @@
 #   ./setup.sh --check         # report state, change nothing
 #
 #   Targets: 1password obsidian claude espanso voxtype hyprland claude-code
-#            obsidian-jump
+#            obsidian-jump fonts
 #
 set -euo pipefail
 
@@ -525,6 +525,55 @@ FLOAT
   info "search from the filename to the full path."
 }
 
+# ----------------------------------------------------------------- 8) fonts
+#
+# Omarchy's screensaver is ttfx with --random-effect, and one of those effects
+# is matrix rain drawn in Japanese katakana. A stock instance has no font
+# covering U+30A2 / U+FF71, so the effect renders as a screen of tofu boxes.
+# Nothing else in the screensaver is affected — its logo is block characters,
+# which JetBrainsMono Nerd Font already covers.
+#
+# Source Han Sans JP is the balance: ~30 MB for Japanese, against ~300 MB for
+# noto-fonts-cjk if Chinese and Korean are also wanted. Fontconfig falls back
+# per glyph, so the terminal font is unchanged and only the katakana come from
+# here — no terminal config edit.
+
+JP_FONT_PKG="adobe-source-han-sans-jp-fonts"
+
+have_katakana() {
+  # U+30A2 KATAKANA LETTER A — present iff some font can draw the matrix rain.
+  [[ -n $(fc-list ':charset=30a2' family 2>/dev/null | head -1) ]]
+}
+
+install_fonts() {
+  step "Japanese font (screensaver katakana)"
+
+  if ! have fc-list; then
+    warn "fontconfig not found — skipping."
+    return 0
+  fi
+
+  if have_katakana; then
+    skip "katakana already covered by $(fc-list ':charset=30a2' family 2>/dev/null | head -1 | cut -d, -f1)"
+    return 0
+  fi
+
+  if pkg_local "$JP_FONT_PKG"; then
+    info "$JP_FONT_PKG is installed but katakana is still unresolved; refreshing the font cache..."
+    fc-cache -f >/dev/null 2>&1 || true
+  else
+    info "Installing $JP_FONT_PKG (~30 MB) so the matrix screensaver renders..."
+    sudo pacman -S --needed --noconfirm "$JP_FONT_PKG"
+    fc-cache -f >/dev/null 2>&1 || true
+  fi
+
+  if have_katakana; then
+    info "Katakana now resolves to: $(fc-list ':charset=30a2' family 2>/dev/null | head -1 | cut -d, -f1)"
+  else
+    warn "Katakana still unresolved — try 'fc-cache -fv' and re-check with 'fc-list :charset=30a2'."
+  fi
+}
+
 # ------------------------------------------------------------------- report
 
 report() {
@@ -545,6 +594,8 @@ report() {
     "$(grep -qF 'md\\.obsidian' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null && echo "applied" || echo "not applied")"
   printf '    %-16s %s\n' "obsidian-jump" \
     "$([[ -x "$HOME/.local/bin/obsidian-jump" ]] && echo "installed (SUPER + N)" || echo "MISSING")"
+  printf '    %-16s %s\n' "katakana font" \
+    "$(f=$(fc-list ':charset=30a2' family 2>/dev/null | head -1 | cut -d, -f1); echo "${f:-MISSING — matrix screensaver renders as boxes}")"
   printf '    %-16s %s\n' "fcitx5" \
     "$(pkg_local fcitx5 && echo "installed" || echo "MISSING — omarchy-fcitx5.service will crash-loop")"
   printf '    %-16s %s\n' "edk2-aarch64" \
@@ -568,7 +619,7 @@ main() {
   preflight
 
   local targets=("$@")
-  ((${#targets[@]})) || targets=(1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump)
+  ((${#targets[@]})) || targets=(1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump fonts)
 
   for t in "${targets[@]}"; do
     case "$t" in
@@ -580,7 +631,8 @@ main() {
       hyprland|workspaces)     configure_hyprland ;;
       claude-code|cc)          configure_claude_code ;;
       obsidian-jump|jump)      configure_obsidian_jump ;;
-      *) die "Unknown target: $t (valid: 1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump)" ;;
+      fonts|font)              install_fonts ;;
+      *) die "Unknown target: $t (valid: 1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump fonts)" ;;
     esac
   done
 
