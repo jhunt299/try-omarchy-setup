@@ -14,6 +14,7 @@
 #   ./setup.sh --check         # report state, change nothing
 #
 #   Targets: 1password obsidian claude espanso voxtype hyprland claude-code
+#            obsidian-jump
 #
 set -euo pipefail
 
@@ -443,6 +444,87 @@ else:
 PY
 }
 
+# -------------------------------------------------- 7) obsidian note jumper
+#
+# SUPER + N opens a fuzzy picker over every note in every vault and opens the
+# choice in Obsidian. Obsidian's own Quick Switcher only works when Obsidian is
+# already focused, and no plugin can fix that — the gap is on the desktop side.
+#
+# Two things this deliberately does not do:
+#   * It does not use omarchy-menu-select. That picker serialises every option
+#     into a single perl argument, and Linux caps one argument at 128 KB
+#     regardless of ARG_MAX. A few thousand notes exceed that and it dies with
+#     "Argument list too long", silently, with no window. fzf reads stdin.
+#   * It does not add rofi. Omarchy already has a launcher; a second one means
+#     a second config and a second theme to keep in sync.
+
+JUMP_BIN="$HOME/.local/bin/obsidian-jump"
+JUMP_MARKER="-- >>> try-omarchy-setup: obsidian jump >>>"
+
+configure_obsidian_jump() {
+  step "Obsidian note jumper (SUPER + N)"
+
+  have fzf || { warn "fzf not installed — skipping."; return 0; }
+
+  local src="$(dirname "$(readlink -f "$0")")/bin/obsidian-jump"
+  if [[ ! -f $src ]]; then
+    warn "bin/obsidian-jump missing from the repo — skipping."
+    return 0
+  fi
+
+  mkdir -p "$HOME/.local/bin"
+  if [[ -f $JUMP_BIN ]] && cmp -s "$src" "$JUMP_BIN"; then
+    skip "obsidian-jump already up to date"
+  else
+    install -m 755 "$src" "$JUMP_BIN"
+    info "Installed $JUMP_BIN"
+  fi
+
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) warn "~/.local/bin is not on PATH — the keybinding will not find the script." ;;
+  esac
+
+  # Keybinding
+  local binds="$HOME/.config/hypr/bindings.lua"
+  if [[ ! -f $binds ]]; then
+    warn "$binds not found — skipping keybinding."
+  elif grep -qF -- "$JUMP_MARKER" "$binds" || grep -qF 'obsidian-jump' "$binds"; then
+    skip "SUPER + N already bound"
+  else
+    cp "$binds" "$binds.bak.$(date +%s)"
+    cat >>"$binds" <<'BIND'
+
+-- >>> try-omarchy-setup: obsidian jump >>>
+-- Jump straight to any Obsidian note, across every vault, without Obsidian
+-- needing focus first.
+o.bind("SUPER + N", "Obsidian note", "obsidian-jump")
+-- <<< try-omarchy-setup: obsidian jump <<<
+BIND
+    info "Bound SUPER + N"
+  fi
+
+  # Float the picker terminal like a launcher rather than tiling it.
+  local conf="$HOME/.config/hypr/hyprland.lua"
+  if [[ -f $conf ]] && ! grep -qF 'obsidian-jump' "$conf"; then
+    cat >>"$conf" <<'FLOAT'
+
+-- The SUPER + N note picker: a floating terminal running fzf.
+o.window("^obsidian-jump$", { float = true, center = true, size = { 900, 600 } })
+FLOAT
+    info "Added the floating-window rule"
+  else
+    skip "window rule already present"
+  fi
+
+  if have hyprctl && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    hyprctl reload >/dev/null 2>&1 || true
+  fi
+
+  info "Press SUPER + N, type part of a note name, Enter. Ctrl-T widens the"
+  info "search from the filename to the full path."
+}
+
 # ------------------------------------------------------------------- report
 
 report() {
@@ -461,6 +543,8 @@ report() {
     "$(compgen -G "$HOME/.local/share/voxtype/models/*.bin" >/dev/null && echo "present" || echo "MISSING — daemon transcribes nothing")"
   printf '    %-16s %s\n' "workspace rules" \
     "$(grep -qF 'md\\.obsidian' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null && echo "applied" || echo "not applied")"
+  printf '    %-16s %s\n' "obsidian-jump" \
+    "$([[ -x "$HOME/.local/bin/obsidian-jump" ]] && echo "installed (SUPER + N)" || echo "MISSING")"
   printf '    %-16s %s\n' "fcitx5" \
     "$(pkg_local fcitx5 && echo "installed" || echo "MISSING — omarchy-fcitx5.service will crash-loop")"
   printf '    %-16s %s\n' "edk2-aarch64" \
@@ -484,7 +568,7 @@ main() {
   preflight
 
   local targets=("$@")
-  ((${#targets[@]})) || targets=(1password obsidian claude espanso voxtype hyprland claude-code)
+  ((${#targets[@]})) || targets=(1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump)
 
   for t in "${targets[@]}"; do
     case "$t" in
@@ -495,7 +579,8 @@ main() {
       voxtype)                 install_voxtype ;;
       hyprland|workspaces)     configure_hyprland ;;
       claude-code|cc)          configure_claude_code ;;
-      *) die "Unknown target: $t (valid: 1password obsidian claude espanso voxtype hyprland claude-code)" ;;
+      obsidian-jump|jump)      configure_obsidian_jump ;;
+      *) die "Unknown target: $t (valid: 1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump)" ;;
     esac
   done
 

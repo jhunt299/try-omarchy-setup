@@ -23,7 +23,8 @@ cd try-omarchy-setup
 ```
 
 Targets: `1password` `obsidian` `claude` `espanso` `voxtype` `hyprland`
-`claude-code`. The last two only write config and need no `sudo`.
+`claude-code` `obsidian-jump`. The last three only write config and need no
+`sudo`.
 
 The script is idempotent — re-running skips anything already done, so it is safe
 to run repeatedly or to resume after a failure.
@@ -213,6 +214,44 @@ of them. The flip side is that they cannot be told apart by class.
 Rules apply to **newly opened windows only**. Anything already running stays
 where it is until you close and reopen it.
 
+### `obsidian-jump` — SUPER + N jumps to any note
+
+Installs `~/.local/bin/obsidian-jump`, binds `SUPER + N`, and adds a
+floating-window rule so the picker behaves like a launcher.
+
+Obsidian's own Quick Switcher (`Ctrl+O`) only works once Obsidian is focused,
+and **no plugin can change that** — the gap is on the desktop side, not
+Obsidian's. The usual Linux answer is Rofi plus a helper plugin, which means
+running a second launcher alongside Omarchy's own. This avoids that.
+
+Vaults are read from Obsidian's registry
+(`~/.var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json`), falling back
+to scanning `~/Documents` for `.obsidian` directories, so new vaults are picked
+up without editing anything.
+
+Three decisions worth keeping:
+
+**It does not use `omarchy-menu-select`.** That picker serialises every option
+into a *single* `perl` argument, and Linux caps one argument at 128 KB no matter
+that `ARG_MAX` is 2 MB. A ~4,000-note vault produces ~370 KB and it dies with
+`Argument list too long` — silently, with no window ever appearing. The same
+limit applies to `omarchy menu file` on a large directory. `fzf` reads stdin, so
+list size is irrelevant. (`fzf` is an Omarchy base package, so it is already
+there.)
+
+**Sorting stays on.** `--no-sort` preserves the newest-first input order but
+disables match ranking, which buried an exact-title match at position 477.
+
+**Matching is on the filename, not the path** (`--nth=-1`). With the whole path
+searchable, an exact title loses to longer paths containing the same words, so
+the note you just typed the name of is not the one under the cursor. `Ctrl-T`
+widens matching back to the full path for narrowing by folder.
+
+The listing is a single `find` piped through `sort` and `sed` — about 20 ms for
+4,000 notes. An earlier per-line shell loop took 2.5 s, which felt broken.
+
+---
+
 ### `claude-code` — stop the trust prompt on every launch
 
 Claude Code asks whether you trust the working directory on each start unless
@@ -326,6 +365,7 @@ Espanso          2.4.1-1
 Voxtype          1.0.1-1
   model          present
 workspace rules  applied
+obsidian-jump    installed (SUPER + N)
 fcitx5           MISSING — omarchy-fcitx5.service will crash-loop
 edk2-aarch64     202608-1
 input group      yes
@@ -367,6 +407,7 @@ Captured 2026-09-14 from the working instance:
 | Voxtype | 1.0.1-1 (AUR, built from source) |
 | Whisper model | `ggml-base.en.bin` (~142 MB) |
 | Hyprland | 0.56.1 |
+| fzf | 0.74.3 (Omarchy base package) |
 | edk2-aarch64 | 202608-1 (Arch `extra`) |
 | Kernel | 7.2.2-2-aarch64-ARCH |
 

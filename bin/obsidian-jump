@@ -1,0 +1,91 @@
+#!/bin/bash
+# Fuzzy-pick an Obsidian note across all vaults and open it in Obsidian.
+#
+# Bound to SUPER + N.
+#
+# Uses fzf in a floating terminal rather than omarchy-menu-select: that picker
+# passes every option as a single perl argument, and Linux caps one argument at
+# 128 KB. This vault produces ~370 KB of paths, so it fails with "Argument list
+# too long". fzf reads stdin, so list size is irrelevant.
+#
+# Matching is on the filename only (--nth=-1): with the whole path searchable,
+# an exact title loses to longer paths that also contain the words, so the note
+# you typed the name of is not the one under the cursor. Ctrl-T widens matching
+# back to the full path when you want to narrow by folder. Sorting is left ON —
+# --no-sort preserves the newest-first input order but disables match ranking,
+# which buried exact titles hundreds of rows down.
+
+set -uo pipefail
+
+# Vaults come from Obsidian's own registry, so a new vault is picked up without
+# editing this script. Falls back to scanning ~/Documents if the registry is
+# missing (Obsidian never launched, or a non-flatpak install).
+OBSIDIAN_CONFIG="$HOME/.var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"
+[[ -f $OBSIDIAN_CONFIG ]] || OBSIDIAN_CONFIG="$HOME/.config/obsidian/obsidian.json"
+
+mapfile -t VAULTS < <(
+  if [[ -f $OBSIDIAN_CONFIG ]]; then
+    python3 - "$OBSIDIAN_CONFIG" <<'PYV'
+import json, os, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+for v in (data.get("vaults") or {}).values():
+    p = v.get("path")
+    if p and os.path.isdir(p):
+        print(p)
+PYV
+  fi
+)
+
+# Fallback: any directory under ~/Documents that looks like a vault.
+if ((${#VAULTS[@]} == 0)); then
+  mapfile -t VAULTS < <(
+    find "$HOME/Documents" -maxdepth 3 -type d -name '.obsidian' \
+      -printf '%h\n' 2>/dev/null | sort -u
+  )
+fi
+
+((${#VAULTS[@]})) || { notify-send "Obsidian jump" "No vaults found" 2>/dev/null; exit 1; }
+
+# Longest common parent, so displayed paths stay short but stay unambiguous.
+VAULT_ROOT=$(printf '%s\n' "${VAULTS[@]}" | sed 's|/[^/]*$||' | sort -u | head -1)
+
+# Relaunch inside a floating terminal, since fzf needs a tty.
+if [[ -z ${OBSIDIAN_JUMP_INNER:-} ]]; then
+  exec setsid uwsm-app -- foot --app-id obsidian-jump \
+    -e env OBSIDIAN_JUMP_INNER=1 "$0"
+fi
+
+# Newest first — the note you want is usually one you touched recently.
+# Paths are relative to ~/Documents so the list stays readable.
+list_notes() {
+  find "${VAULTS[@]}" \
+       -type d \( -name '.obsidian' -o -name '.trash' \) -prune -o \
+       -type f -name '*.md' ! -name '.*' -printf '%T@\t%p\n' 2>/dev/null |
+    sort -rn | cut -f2- | sed "s|^${VAULT_ROOT}/||"
+}
+
+selection=$(list_notes | fzf \
+  --prompt='note> ' \
+  --info=inline \
+  --height=100% \
+  --border=none \
+  --delimiter=/ \
+  --nth=-1 \
+  --tiebreak=length,index \
+  --bind 'ctrl-t:change-nth(-1|..)' \
+  --header='Enter opens in Obsidian · Ctrl-T searches full path · Esc cancels')
+
+[[ -n ${selection:-} ]] || exit 0
+
+abs="$VAULT_ROOT/$selection"
+if [[ ! -f $abs ]]; then
+  notify-send "Obsidian jump" "Not found: $selection" 2>/dev/null
+  exit 1
+fi
+
+uri="obsidian://open?path=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$abs")"
+exec uwsm-app -- xdg-open "$uri"
