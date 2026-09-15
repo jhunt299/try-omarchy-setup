@@ -34,7 +34,8 @@ screensaver renders as a screen of boxes. Individual targets work too, e.g.
 - **`sudo` needs a password and you cannot supply one.** When something needs
   root, hand me the command and tell me to prefix it with `!` so it prompts in
   this session. `setup.sh` calls `sudo` itself, so I'll run the whole script
-  that way.
+  that way — it asks once at the start and holds the credential for the rest of
+  the run, so don't split it into per-target invocations to avoid prompts.
 - **Never assume a package exists.** This is Arch Linux ARM, not x86_64 Arch.
   Check `pacman -Si <pkg>` first, and check the `arch=()` line of any AUR
   PKGBUILD — several common packages are x86_64-only and simply cannot be

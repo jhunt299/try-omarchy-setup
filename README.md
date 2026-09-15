@@ -29,6 +29,14 @@ Targets: `1password` `obsidian` `claude` `espanso` `voxtype` `hyprland`
 The script is idempotent — re-running skips anything already done, so it is safe
 to run repeatedly or to resume after a failure.
 
+You are asked for your password **once**, at the very start. A full run is long
+and mostly Rust builds, and sudo's timestamp here is the default 15 minutes per
+tty — so without this a build that outlasts it makes the next `sudo` re-prompt
+unattended, halfway down the screen. The script authenticates up front and
+refreshes the timestamp in the background until it exits. Targets that only
+write config (`hyprland`, `claude-code`, `obsidian-jump`) never ask at all, and
+neither does `--check`.
+
 Expect roughly **15–25 minutes** on a clean instance. The slow parts are
 1Password's 204 MB tarball, Claude Desktop's 158 MB download, and Espanso, which
 compiles from Rust source.

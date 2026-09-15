@@ -47,6 +47,53 @@ die()  { printf '\n%sERROR:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
 have()      { command -v "$1" >/dev/null 2>&1; }
 pkg_local() { pacman -Q "$1" >/dev/null 2>&1; }
 
+# ------------------------------------------------------------ sudo session
+#
+# A full run is 15-25 minutes, most of it Rust builds for Espanso and Voxtype.
+# sudo's timestamp here is the default 15 minutes per tty, so a build that runs
+# longer than that makes the *next* sudo call re-prompt, often unattended and
+# halfway down the screen. Authenticate once up front, then refresh the
+# timestamp in the background for as long as the script lives.
+#
+# Only started when a requested target actually needs root: running just
+# `./setup.sh hyprland` must not ask for a password it never uses.
+
+SUDO_KEEPALIVE_PID=""
+
+stop_sudo_keepalive() {
+  [[ -n $SUDO_KEEPALIVE_PID ]] || return 0
+  kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  SUDO_KEEPALIVE_PID=""
+}
+
+start_sudo_keepalive() {
+  step "Authenticating"
+  info "Asking for your password once now, so long builds don't re-prompt later."
+  sudo -v || die "Could not authenticate with sudo."
+
+  # `kill -0 $$` — $$ stays the parent's pid inside a subshell, so the refresher
+  # stops on its own if the script is killed rather than exiting cleanly.
+  local parent=$$
+  ( while kill -0 "$parent" 2>/dev/null; do
+      sudo -n true 2>/dev/null || exit 0
+      sleep 60
+    done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap stop_sudo_keepalive EXIT INT TERM
+}
+
+# True when any requested target does privileged work.
+targets_need_sudo() {
+  local t
+  for t in "$@"; do
+    case "$t" in
+      hyprland|workspaces|claude-code|cc|obsidian-jump|jump) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # --------------------------------------------------------------- preflight
 
 preflight() {
@@ -616,10 +663,14 @@ main() {
     exit 0
   fi
 
-  preflight
-
   local targets=("$@")
   ((${#targets[@]})) || targets=(1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump fonts)
+
+  if targets_need_sudo "${targets[@]}"; then
+    start_sudo_keepalive
+  fi
+
+  preflight
 
   for t in "${targets[@]}"; do
     case "$t" in
@@ -635,6 +686,8 @@ main() {
       *) die "Unknown target: $t (valid: 1password obsidian claude espanso voxtype hyprland claude-code obsidian-jump fonts)" ;;
     esac
   done
+
+  stop_sudo_keepalive
 
   report
   step "Done."
