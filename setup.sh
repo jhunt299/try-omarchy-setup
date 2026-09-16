@@ -30,6 +30,10 @@ ARCH_MIRROR="https://geo.mirror.pkgbuild.com/extra/os/x86_64"
 
 BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/try-omarchy-setup"
 
+# yay otherwise stops to ask about diffs, cleaning, editing and confirmation
+# for every AUR package, which defeats the point of a one-password run.
+YAY_UNATTENDED=(--noconfirm --answerdiff None --answerclean None --answeredit None)
+
 # ------------------------------------------------------------------ output
 
 if [[ -t 1 ]]; then
@@ -102,10 +106,12 @@ preflight() {
   have pacman || die "pacman not found — this is not an Arch system."
 
   # base-devel + git are needed to build anything from the AUR. base-devel is a
-  # package *group*, so `pacman -Q base-devel` always fails and must not be used
-  # as the test — checking for the tools themselves is what actually works.
+  # metapackage now, so `pacman -Q` is a real test. Checking for gcc/make/
+  # fakeroot instead is not enough: the Try-Omarchy image ships those but not
+  # pkgconf, and without pkg-config every Rust -sys crate (openssl-sys for
+  # espanso) fails to locate its library.
   local need=()
-  if ! { have gcc && have make && have fakeroot; }; then need+=(base-devel); fi
+  pkg_local base-devel || need+=(base-devel)
   have git || need+=(git)
   if ((${#need[@]})); then
     step "Installing build prerequisites: ${need[*]}"
@@ -135,7 +141,7 @@ install_1password() {
     return 0
   fi
 
-  local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+  local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"; trap - RETURN' RETURN
 
   info "Downloading official aarch64 tarball (~204 MB)..."
   curl -fL# -o "$tmp/1password.tar.gz" "$ONEPASSWORD_TAR" || die "1Password download failed."
@@ -214,7 +220,9 @@ ensure_edk2() {
     || die "Could not query the Arch package API."
   [[ -n "$fname" ]] || die "Arch API returned no edk2-aarch64 package."
 
-  local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+  # A RETURN trap outlives the function that set it and fires again when the
+  # caller returns — by then $tmp is gone and set -u aborts the script.
+  local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"; trap - RETURN' RETURN
   info "Downloading $fname..."
   curl -fL# -o "$tmp/$fname" "$ARCH_MIRROR/$fname" || die "edk2-aarch64 download failed."
 
@@ -292,6 +300,13 @@ install_claude() {
 # Wayland needs the separate `espanso-wayland` AUR build (the plain `espanso`
 # package is X11). It reads the keyboard through evdev, so the user must be in
 # the `input` group — without it espanso starts but silently expands nothing.
+#
+# Built with makepkg rather than yay because the AUR PKGBUILD needs a patch:
+# upstream 2.4.1 renamed espanso/src/res/linux/icon.png to espanso.png, and
+# package() still installs the old name. Both Rust builds succeed and then the
+# package step dies on that one `install`, wasting 15 minutes every time.
+
+AUR_ESPANSO="https://aur.archlinux.org/espanso.git"
 
 install_espanso() {
   step "Espanso"
@@ -299,9 +314,37 @@ install_espanso() {
   if pkg_local espanso-wayland; then
     skip "espanso-wayland already installed ($(pacman -Q espanso-wayland | awk '{print $2}'))"
   else
-    have yay || die "yay not found. Install an AUR helper, or build espanso-wayland with makepkg."
-    info "Installing espanso-wayland from the AUR (Rust build — this is slow)..."
-    yay -S --needed espanso-wayland
+    local repo="$BUILD_DIR/espanso"
+    if [[ -d "$repo/.git" ]]; then
+      info "Updating existing AUR checkout..."
+      git -C "$repo" checkout -q -- PKGBUILD
+      git -C "$repo" pull -q --ff-only
+    else
+      info "Cloning AUR package..."
+      rm -rf "$repo"
+      git clone --quiet "$AUR_ESPANSO" "$repo"
+    fi
+
+    # No-op once the AUR PKGBUILD catches up with the rename.
+    sed -i 's|espanso/src/res/linux/icon\.png|espanso/src/res/linux/espanso.png|' "$repo/PKGBUILD"
+
+    echo
+    warn "Review the PKGBUILD before building (this is AUR, i.e. untrusted):"
+    warn "  less $repo/PKGBUILD"
+    echo
+
+    # -s installs makedepends (and -r removes them afterwards; rust alone is
+    # 245 MB). -A because the PKGBUILD lists only x86_64 although it builds
+    # fine here. --nocheck skips a third, debug-mode build for the tests.
+    info "Building (two Rust release builds — 10-15 minutes)..."
+    ( cd "$repo" && makepkg -sfrA --noconfirm --nocheck )
+
+    local built
+    built=$(find "$repo" -maxdepth 1 -name 'espanso-wayland-*.pkg.tar.*' | head -1)
+    [[ -n "$built" ]] || die "Build produced no espanso-wayland package."
+
+    info "Installing $(basename "$built")..."
+    sudo pacman -U --noconfirm "$built"
   fi
 
   if id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
@@ -346,6 +389,10 @@ VOXTYPE_KEYS=(
 )
 VOXTYPE_MODEL="base.en"
 
+# Try-Omarchy's local repo ships `voxtype-bin` (official signed ARM64 binaries,
+# Provides voxtype). pacman -Q by name misses it, so check both.
+voxtype_pkg() { pacman -Q voxtype 2>/dev/null || pacman -Q voxtype-bin 2>/dev/null; }
+
 ensure_input_group() {
   if id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
     skip "$USER is already in the 'input' group"
@@ -359,8 +406,11 @@ ensure_input_group() {
 install_voxtype() {
   step "Voxtype"
 
-  if pkg_local voxtype; then
-    skip "voxtype already installed ($(pacman -Q voxtype | awk '{print $2}'))"
+  if voxtype_pkg >/dev/null; then
+    skip "already installed ($(voxtype_pkg))"
+  elif pacman -Si voxtype-bin >/dev/null 2>&1; then
+    info "Installing voxtype-bin from the $(pacman -Si voxtype-bin | awk '/^Repository/{print $3}') repo (prebuilt, no Rust build)..."
+    sudo pacman -S --needed --noconfirm voxtype-bin
   else
     have yay || die "yay not found. Install an AUR helper, or build voxtype with makepkg."
 
@@ -372,7 +422,7 @@ install_voxtype() {
     done
 
     info "Building voxtype from the AUR (three Rust release builds — ~5 min on 8 cores)..."
-    yay -S --needed --mflags --nocheck voxtype
+    yay -S --needed "${YAY_UNATTENDED[@]}" --mflags --nocheck voxtype
   fi
 
   ensure_input_group
@@ -634,7 +684,7 @@ report() {
   printf '    %-16s %s\n' "Espanso" \
     "$(pkg_local espanso-wayland && pacman -Q espanso-wayland | awk '{print $2}' || echo "MISSING")"
   printf '    %-16s %s\n' "Voxtype" \
-    "$(pkg_local voxtype && pacman -Q voxtype | awk '{print $2}' || echo "MISSING")"
+    "$(v=$(voxtype_pkg | awk '{print $2}'); echo "${v:-MISSING}")"
   printf '    %-16s %s\n' "  model" \
     "$(compgen -G "$HOME/.local/share/voxtype/models/*.bin" >/dev/null && echo "present" || echo "MISSING — daemon transcribes nothing")"
   printf '    %-16s %s\n' "workspace rules" \

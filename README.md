@@ -134,7 +134,7 @@ and installs it.
 > it. It is firmware that changes rarely, so this is low-stakes — but it is yours
 > to re-pull manually.
 
-### Espanso — Wayland build, plus the `input` group
+### Espanso — Wayland build, a broken PKGBUILD, plus the `input` group
 
 Two requirements, and missing either produces a **silent** failure:
 
@@ -142,6 +142,29 @@ Two requirements, and missing either produces a **silent** failure:
 - Your user must be in the **`input`** group. Espanso reads the keyboard through
   evdev; without group membership it starts cleanly, reports itself as running,
   and expands nothing.
+
+And two build problems, which is why the script uses `makepkg` directly
+instead of `yay`:
+
+**The AUR PKGBUILD's `package()` step is broken for 2.4.1.** Upstream renamed
+`espanso/src/res/linux/icon.png` to `espanso.png`; the PKGBUILD still installs
+the old name. Both Rust release builds succeed — about 15 minutes — and then
+packaging dies on one `install: cannot stat ... icon.png`. yay then removes the
+build dependencies, so a retry starts from scratch. The script patches the path
+with `sed` before building (a no-op once the AUR catches up). If you ever hit
+this by hand, don't rebuild: fix the path in `~/.cache/yay/espanso/PKGBUILD`
+and run `makepkg -R -d -A` there to repackage the existing build.
+
+**`pkg-config` is not on a stock instance.** The Try-Omarchy image ships
+`gcc`, `make` and `fakeroot` but not the rest of `base-devel` — `pkgconf`,
+`autoconf`, `automake`, `bison`, `flex`, `m4`, `debugedit`, `groff`, `texinfo`
+are all absent. Without `pkg-config`, `openssl-sys` fails with "Could not find
+directory of OpenSSL installation" even though `openssl` is installed. The
+script installs the `base-devel` metapackage up front (it *is* a metapackage
+now, so `pacman -Q base-devel` is a valid test).
+
+The PKGBUILD also declares `arch=(x86_64)` only. Espanso builds fine on
+aarch64; the script passes `makepkg -A` to skip the check.
 
 Then register the user service:
 
@@ -162,10 +185,17 @@ Config lives in `~/.config/espanso/` — `config/default.yml` and
 
 ---
 
-### Voxtype — slow build, and the models are a separate download
+### Voxtype — prebuilt in the local repo, and the models are a separate download
 
-Unlike the other four, `voxtype` builds cleanly on aarch64 — its PKGBUILD
-declares the architecture. The problems are elsewhere:
+The Try-Omarchy image ships a local pacman repo (`[try-omarchy]`, served from
+`/usr/share/try-omarchy/repo`) containing **`voxtype-bin`** — official signed
+ARM64 binaries, `Provides: voxtype`. The script installs that when it exists
+and only falls back to the AUR source build without it. Note that
+`pacman -Q voxtype` does not see a package named `voxtype-bin`, so any
+"is it installed" check has to look for both names.
+
+The AUR fallback builds cleanly on aarch64 — its PKGBUILD declares the
+architecture — but is slow and fragile:
 
 The build is **three sequential Rust release builds** (native CPU, Vulkan, then
 the OSD frontends) with a `cargo clean` between each, so it takes roughly five
@@ -306,29 +336,32 @@ fc-list ':charset=30a2' family | head -1
 
 These are environmental, not caused by anything above. Each one cost real time.
 
-### `omarchy update` is currently broken
+### `omarchy update` and the `aquamarine` / `hyprland` soname split
 
-`aquamarine` 0.15.0 bumped its library version to `libaquamarine.so=14`.
-`hyprtoolkit` has been rebuilt against it; **`hyprland` has not**, in any
-configured repo — both `extra` and `try-omarchy` still require
-`libaquamarine.so=13`. The dependency is unsatisfiable in either direction, so
-`pacman -Syu` aborts during resolution and the whole update does nothing:
+`aquamarine` 0.15.0 bumped its library version to `libaquamarine.so=14`. On
+the 2026-09-14 instance `hyprland` had not been rebuilt against it in any
+configured repo, so `pacman -Syu` aborted during resolution and the whole
+update did nothing:
 
 ```
 :: installing aquamarine (0.15.0-2) breaks dependency 'libaquamarine.so=13-64' required by hyprland
 error: failed to prepare transaction (could not satisfy dependencies)
 ```
 
-Nothing is half-installed — it fails before the transaction starts. This is
-Arch Linux ARM lag waiting on a `hyprland` rebuild. To unblock the rest:
+`omarchy-update` runs under `set -e` with the package step ahead of migrations,
+hooks, AUR updates and orphan cleanup, so a failure there silently skips all of
+them.
+
+As of the 2026-09-15 image this is handled by the image itself: `/etc/pacman.conf`
+ships `IgnorePkg = linux-aarch64 linux-aarch64-headers hyprland aquamarine
+hyprtoolkit`, and `hyprland` is pinned to the local `[try-omarchy]` repo at
+0.56.1 (`extra` has moved on to 0.56.2 against the new `aquamarine`). Those
+pins are load-bearing — leave them. If an older instance still aborts, the
+manual equivalent is:
 
 ```bash
 sudo pacman -Syu --ignore aquamarine --ignore hyprtoolkit
 ```
-
-`omarchy-update` runs under `set -e` with the package step ahead of migrations,
-hooks, AUR updates and orphan cleanup, so a failure here silently skips all of
-them.
 
 ### `fcitx5` is missing from a base install
 
@@ -375,10 +408,12 @@ corruption.
 ## Cowork and nested virtualisation
 
 Claude Desktop's **Cowork** feature runs its sandbox inside a QEMU VM. On this
-machine that is nested virtualisation, and it is currently **not available**:
+machine that is nested virtualisation. Whether it is available depends on the
+macOS-side VM settings — on the 2026-09-14 instance it was **not**, on the
+2026-09-15 instance it was. Check with `./setup.sh --check`:
 
-- `/dev/kvm` — **absent**. The hypervisor is not exposing nested virt to this guest.
-- `/dev/vhost-vsock` — present, so the host↔VM channel itself is fine.
+- `/dev/kvm` — absent means the hypervisor is not exposing nested virt to this guest.
+- `/dev/vhost-vsock` — present either way, so the host↔VM channel itself is fine.
 
 The M4 Max hardware does support nested virtualisation (Apple Silicon added it
 with M3), so this is a macOS-side setting, not a hardware limit — your
