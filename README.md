@@ -332,6 +332,60 @@ fc-list ':charset=30a2' family | head -1
 
 ---
 
+## AeroSpace on the Mac host
+
+`mac/aerospace.toml` makes the Mac itself tile like Omarchy, so the same
+shortcuts work outside the VM. This is config for the host, not the VM, and
+`setup.sh` does not touch it.
+
+```bash
+brew install --cask nikitabobko/tap/aerospace
+cp mac/aerospace.toml ~/.aerospace.toml
+aerospace reload-config
+```
+
+Then grant AeroSpace Accessibility access (System Settings → Privacy &
+Security → Accessibility).
+
+**SUPER is Option, not Command.** AeroSpace hotkeys are global. If they used
+Command, they would take every SUPER shortcut away from the VM while it had
+focus, and they would also collide with `cmd-w`, `cmd-q`, `cmd-space` and
+`cmd-tab`. So on the Mac it's `Option + 1` and in the VM it's `Cmd + 1`, and
+the rest of each shortcut stays the same.
+
+| Omarchy | Mac | Action |
+|---------|-----|--------|
+| SUPER + Return | ⌥ Return | Terminal (Ghostty, else Terminal) |
+| SUPER + Space | ⌥ Space | Launcher (opens Spotlight) |
+| SUPER + SHIFT + B / F | ⌥ ⇧ B / F | Browser / file manager |
+| SUPER + W | ⌥ W | Close window |
+| SUPER + F / T / J | ⌥ F / T / J | Fullscreen / float / toggle split |
+| SUPER + G | ⌥ G | Toggle group (accordion) |
+| SUPER + arrows | ⌥ arrows | Move focus |
+| SUPER + SHIFT + arrows | ⌥ ⇧ arrows | Swap window |
+| SUPER + − / = (+ SHIFT) | ⌥ − / = (+ ⇧) | Resize width (height) |
+| SUPER + 1…0 | ⌥ 1…0 | Switch workspace |
+| SUPER + SHIFT + 1…0 | ⌥ ⇧ 1…0 | Move window there and follow |
+| SUPER + Tab / SHIFT + Tab / CTRL + Tab | same with ⌥ | Next / previous / last workspace |
+
+Obsidian, Claude, Finder and 1Password are pinned to workspaces 1, 3, 5 and 6,
+the same as the `hyprland` target.
+
+Some Hyprland behaviour can't be reproduced in AeroSpace:
+
+- **Dwindle layout.** AeroSpace uses an i3-style tree, so new windows join the
+  current container instead of halving the focused window. With `auto`
+  orientation and normalization turned on, the first few splits look the same;
+  deeper splits differ.
+- **Focus follows mouse, animations, rounded or coloured borders, blur.** For
+  borders, add JankyBorders (`brew install FelixKratz/formulae/borders`).
+- **Scratchpad (SUPER + S), SUPER + mouse drag/scroll, window groups with
+  tabs.** SUPER + G gives accordion, which is the closest match.
+- Option + letter no longer types accented characters (é, ü, …) while
+  AeroSpace is running.
+
+---
+
 ## Known issues on this platform
 
 These are environmental, not caused by anything above. Each one cost real time.

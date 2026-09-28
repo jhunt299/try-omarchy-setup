@@ -1,0 +1,129 @@
+# AeroSpace config that mirrors Omarchy's Hyprland keybindings on the Mac host.
+#
+# Install:  brew install --cask nikitabobko/tap/aerospace
+#           cp mac/aerospace.toml ~/.aerospace.toml && aerospace reload-config
+#
+# SUPER is mapped to Option (alt), not Command. The Omarchy VM uses Command as
+# SUPER, and AeroSpace hotkeys are global, so binding cmd-* here would take
+# every SUPER shortcut away from the VM while it has focus. Command also owns
+# cmd-w, cmd-q, cmd-space and cmd-tab system-wide. See README.md "AeroSpace".
+
+start-at-login = true
+
+# Hyprland dwindle is closest to AeroSpace's i3-style tree with auto orientation.
+enable-normalization-flatten-containers = true
+enable-normalization-opposite-orientation-for-nested-containers = true
+default-root-container-layout = 'tiles'
+default-root-container-orientation = 'auto'
+accordion-padding = 30
+
+# Hyprland focus_on_activate: switch to the workspace of a window that asks for focus.
+automatically-unhide-macos-hidden-apps = true
+on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
+
+# Omarchy: gaps_in = 5 (10 between windows), gaps_out = 10.
+[gaps]
+inner.horizontal = 10
+inner.vertical   = 10
+outer.left       = 10
+outer.bottom     = 10
+outer.top        = 10
+outer.right      = 10
+
+[key-mapping]
+preset = 'qwerty'
+
+[mode.main.binding]
+# --- Apps ---------------------------------------------------------------
+# SUPER + Return: terminal
+alt-enter = 'exec-and-forget open -na Ghostty || open -na Terminal'
+# SUPER + SHIFT + B: browser
+alt-shift-b = 'exec-and-forget open -na "Google Chrome" || open -a Safari'
+# SUPER + SHIFT + F: file manager
+alt-shift-f = 'exec-and-forget open ~'
+# SUPER + Space: launcher (hands off to Spotlight)
+alt-space = '''exec-and-forget osascript -e 'tell application "System Events" to keystroke space using command down''''
+
+# --- Windows ------------------------------------------------------------
+# SUPER + W: close window
+alt-w = 'close --quit-if-last-window'
+# SUPER + F: fullscreen
+alt-f = 'fullscreen'
+# SUPER + T: toggle floating
+alt-t = 'layout floating tiling'
+# SUPER + J: toggle split direction
+alt-j = 'layout tiles horizontal vertical'
+# SUPER + G: toggle group (nearest AeroSpace equivalent is accordion)
+alt-g = 'layout tiles accordion'
+
+# SUPER + arrows: move focus
+alt-left  = 'focus left'
+alt-right = 'focus right'
+alt-up    = 'focus up'
+alt-down  = 'focus down'
+
+# SUPER + SHIFT + arrows: swap window
+alt-shift-left  = 'move left'
+alt-shift-right = 'move right'
+alt-shift-up    = 'move up'
+alt-shift-down  = 'move down'
+
+# SUPER + minus / equal: resize width; with SHIFT: resize height
+alt-minus       = 'resize width -100'
+alt-equal       = 'resize width +100'
+alt-shift-minus = 'resize height -100'
+alt-shift-equal = 'resize height +100'
+
+# --- Workspaces ---------------------------------------------------------
+# SUPER + 1..0: switch workspace
+alt-1 = 'workspace 1'
+alt-2 = 'workspace 2'
+alt-3 = 'workspace 3'
+alt-4 = 'workspace 4'
+alt-5 = 'workspace 5'
+alt-6 = 'workspace 6'
+alt-7 = 'workspace 7'
+alt-8 = 'workspace 8'
+alt-9 = 'workspace 9'
+alt-0 = 'workspace 10'
+
+# SUPER + SHIFT + 1..0: move window to workspace (and follow, as Hyprland does)
+alt-shift-1 = ['move-node-to-workspace 1', 'workspace 1']
+alt-shift-2 = ['move-node-to-workspace 2', 'workspace 2']
+alt-shift-3 = ['move-node-to-workspace 3', 'workspace 3']
+alt-shift-4 = ['move-node-to-workspace 4', 'workspace 4']
+alt-shift-5 = ['move-node-to-workspace 5', 'workspace 5']
+alt-shift-6 = ['move-node-to-workspace 6', 'workspace 6']
+alt-shift-7 = ['move-node-to-workspace 7', 'workspace 7']
+alt-shift-8 = ['move-node-to-workspace 8', 'workspace 8']
+alt-shift-9 = ['move-node-to-workspace 9', 'workspace 9']
+alt-shift-0 = ['move-node-to-workspace 10', 'workspace 10']
+
+# SUPER + Tab / SHIFT + Tab: next / previous workspace; CTRL + Tab: last used
+alt-tab       = 'workspace --wrap-around next'
+alt-shift-tab = 'workspace --wrap-around prev'
+alt-ctrl-tab  = 'workspace-back-and-forth'
+
+# SUPER + mouse scroll has no AeroSpace equivalent.
+
+# --- Pin apps to the same workspaces as setup.sh's hyprland target ------
+[[on-window-detected]]
+if.app-id = 'md.obsidian'
+run = 'move-node-to-workspace 1'
+
+[[on-window-detected]]
+if.app-id = 'com.anthropic.claudefordesktop'
+run = 'move-node-to-workspace 3'
+
+[[on-window-detected]]
+if.app-id = 'com.apple.finder'
+run = 'move-node-to-workspace 5'
+
+[[on-window-detected]]
+if.app-id = 'com.1password.1password'
+run = 'move-node-to-workspace 6'
+
+# Settings panes don't tile well; Omarchy floats its equivalents too.
+[[on-window-detected]]
+if.app-id = 'com.apple.systempreferences'
+run = 'layout floating'
